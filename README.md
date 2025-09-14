@@ -1,10 +1,7 @@
 # STM32F407VGT + LIS3DSH SPI Polling Demo  
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Repo-black?logo=github)](https://github.com/nikhilsagar/stm32f407-lis3dsh-demo.git)  
-![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)  
-![C](https://img.shields.io/badge/Language-C-blue?logo=c)  
-![STM32](https://img.shields.io/badge/MCU-STM32F407VGT-green?logo=stmicroelectronics)  
-![DSP](https://img.shields.io/badge/Signal--Processing-Filters-orange)  
+
 
 ---
 
