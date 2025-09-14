@@ -1,0 +1,314 @@
+/**
+ * @file    msme_lis3dsh_demo_polling.c
+ * @brief   STM32F4-DISCOVERY + LIS3DSH demo using our LIS3DSH driver (SPI polling)
+ *
+ * Pins (F4DISC default):
+ *   - SPI1_SCK  = PA5 (AF5)
+ *   - SPI1_MISO = PA6 (AF5)
+ *   - SPI1_MOSI = PA7 (AF5)
+ *   - MEMS_CS   = PE3  (GPIO, manual CS, idle HIGH)
+ *
+ * Notes:
+ *   - SPI mode: many boards like Mode 3 (CPOL=1, CPHA=1). Start with Mode 0; if reads are 0xFF/0x00, switch to Mode 3.
+ *   - SPI transfers are **blocking/polling** via spi_driver.h
+ */
+
+#include "STM32f407VGT.h"
+#include "gpio_driver.h"
+#include "spi_driver.h"
+#include "lis3dsh.h"
+#include <stdint.h>
+#include <stdio.h>
+#include <math.h>
+
+/* ================================ Config ================================== */
+
+#define APP_ODR               LIS3DSH_ODR_100HZ
+#define APP_BW                LIS3DSH_BW_50HZ
+#define APP_FS                LIS3DSH_FS_2G
+
+#define APP_FS_HZ             (100.0f)   /* must match APP_ODR */
+#define APP_FC_HZ             (3.0f)     /* LPF cutoff (Hz)     */
+#define AVG_SAMPLES           (8U)
+#define CALIB_SAMPLES         (50U)
+#define STATUS_MAX_TRIES      (5000U)
+#define RAD2DEG               (57.2957795f)
+
+/* LEDs (STM32F4DISC) */
+#define LED_PORT              GPIOD
+#define LED_PIN_GREEN_LX      12U
+#define LED_PIN_ORANGE_UPY    13U
+#define LED_PIN_RED_RX        14U
+#define LED_PIN_BLUE_DOY      15U
+
+/* CS for LIS3DSH */
+#define SPI1_CS_PORT          GPIOE
+#define SPI1_CS_PIN           3U
+
+/* =============================== Local types ============================== */
+
+typedef struct {
+	float a; /* alpha */
+	float y; /* state */
+} LPF1_t;
+
+/* =========================== Private state/decls ========================== */
+
+static SPI_Handle_t hspi1;
+static LIS3DSH_Handle_t hlis;
+
+static void Init_LEDs(void);
+static void Init_SPI1_GPIO_CS(void);
+static void Config_SPI1(void);
+static void delay_cycles(volatile uint32_t n);
+
+/* Filters */
+static inline float lpf_alpha(float fc_hz, float fs_hz) {
+	const float two_pi_fc = 6.28318530718f * fc_hz;
+	return (two_pi_fc) / (two_pi_fc + fs_hz);
+}
+static inline void lpf_init(LPF1_t *f, float fc_hz, float fs_hz) {
+	f->a = lpf_alpha(fc_hz, fs_hz);
+	f->y = 0.0f;
+}
+static inline float lpf_update(LPF1_t *f, float x) {
+	f->y += f->a * (x - f->y);
+	return f->y;
+}
+
+static void add_sample(int16_t x, int16_t y, int16_t z, float *x_avg,
+		float *y_avg, float *z_avg) {
+	static int16_t bx[AVG_SAMPLES], by[AVG_SAMPLES], bz[AVG_SAMPLES];
+	static uint8_t idx = 0;
+	bx[idx] = x;
+	by[idx] = y;
+	bz[idx] = z;
+	idx = (uint8_t) ((idx + 1U) % AVG_SAMPLES);
+	int32_t sx = 0, sy = 0, sz = 0;
+	for (uint32_t i = 0; i < AVG_SAMPLES; ++i) {
+		sx += bx[i];
+		sy += by[i];
+		sz += bz[i];
+	}
+	*x_avg = (float) (sx / (int32_t) AVG_SAMPLES);
+	*y_avg = (float) (sy / (int32_t) AVG_SAMPLES);
+	*z_avg = (float) (sz / (int32_t) AVG_SAMPLES);
+}
+
+/* ================================ Demo ==================================== */
+
+int lis3dsh_spi_polling_demo_main(void) {
+	/* Bring-up */
+	Init_LEDs();
+	Init_SPI1_GPIO_CS();
+	Config_SPI1();
+	SPI_PeripheralControl(&hspi1, ENABLE);
+
+	/* Hook LIS3DSH handle and init (WHO_AM_I, XYZ enable, BDU=1, ODR/BW/FS) */
+	if (LIS3DSH_Init(&hlis, &hspi1, SPI1_CS_PORT, SPI1_CS_PIN, APP_ODR, APP_BW,
+	APP_FS) < 0) {
+		printf("ERR: LIS3DSH init failed\r\n");
+		while (1) {
+			GPIO_WritePin(LED_PORT, LED_PIN_RED_RX, 1);
+			delay_cycles(800000);
+			GPIO_WritePin(LED_PORT, LED_PIN_RED_RX, 0);
+			delay_cycles(400000);
+		}
+	}
+	printf("WHO_AM_I=0x%02X\r\n", (unsigned) LIS3DSH_WhoAmI(&hlis));
+
+	/* Filters */
+	LPF1_t fx, fy, fz;
+	lpf_init(&fx, APP_FC_HZ, APP_FS_HZ);
+	lpf_init(&fy, APP_FC_HZ, APP_FS_HZ);
+	lpf_init(&fz, APP_FC_HZ, APP_FS_HZ);
+
+	/* Startup offset calibration (board still) */
+	float x_off = 0, y_off = 0, z_off = 0;
+	for (uint32_t i = 0; i < CALIB_SAMPLES; ++i) {
+		int16_t rx, ry, rz;
+		LIS3DSH_ReadXYZ_Raw(&hlis, &rx, &ry, &rz);
+		x_off += rx;
+		y_off += ry;
+		z_off += rz;
+		delay_cycles(50000);
+	}
+	x_off /= (float) CALIB_SAMPLES;
+	y_off /= (float) CALIB_SAMPLES;
+	z_off /= (float) CALIB_SAMPLES;
+
+	/* Main loop */
+	while (1) {
+		/* Data-ready poll with timeout */
+		uint32_t tries = 0;
+		while (!LIS3DSH_DataReady(&hlis) && (++tries < STATUS_MAX_TRIES)) { /* spin */
+		}
+		if (tries >= STATUS_MAX_TRIES) {
+			printf("WARN: no data ready; WHO=0x%02X\r\n",
+					(unsigned) LIS3DSH_WhoAmI(&hlis));
+			continue;
+		}
+
+		/* Raw burst read */
+		int16_t rx, ry, rz;
+		LIS3DSH_ReadXYZ_Raw(&hlis, &rx, &ry, &rz);
+
+		/* Moving average (integer domain) */
+		float x_ma, y_ma, z_ma;
+		add_sample(rx, ry, rz, &x_ma, &y_ma, &z_ma);
+
+		/* Remove startup offsets */
+		float x = x_ma - x_off, y = y_ma - y_off, z = z_ma - z_off;
+
+		/* LPF */
+		float xf = lpf_update(&fx, x);
+		float yf = lpf_update(&fy, y);
+		float zf = lpf_update(&fz, z);
+
+		/* Convert LSB -> g (FS=±2g assumed) */
+		const float LSB_TO_G = 0.00006f; /* 60 µg/LSB at ±2g */
+		float ax = xf * LSB_TO_G, ay = yf * LSB_TO_G, az = zf * LSB_TO_G;
+
+		/* Clamp for asin domain */
+		if (ax > 1)
+			ax = 1;
+		if (ax < -1)
+			ax = -1;
+		if (ay > 1)
+			ay = 1;
+		if (ay < -1)
+			ay = -1;
+		if (az > 1)
+			az = 1;
+		if (az < -1)
+			az = -1;
+
+		/* Axis-only tilt (deg) */
+		float x_deg = asinf(ax) * RAD2DEG;
+		float y_deg = asinf(ay) * RAD2DEG;
+		float z_deg = asinf(az) * RAD2DEG;
+
+		/* Simple “activity” LED heartbeat on PD12 */
+		//GPIO_WritePin(LED_PORT, LED_PIN_GREEN_LX, 1);
+		printf("Axis-only ang  X:%8.2f  Y:%8.2f  Z:%8.2f deg\r\n", x_deg, y_deg,
+				z_deg);
+		//GPIO_WritePin(LED_PORT, LED_PIN_GREEN_LX, 0);
+
+		/* --- LED logic ---
+		 * PD12 = GREEN  = LEFT  (X < -15)
+		 * PD14 = RED    = RIGHT (X > +15)
+		 * PD13 = ORANGE = UP    (Y > +15)
+		 * PD15 = BLUE   = DOWN  (Y < -15)
+		 */
+
+		if (x_deg > 15.0f) {
+		    GPIO_WritePin(LED_PORT, LED_PIN_RED_RX,   1); // RIGHT ON
+		    GPIO_WritePin(LED_PORT, LED_PIN_GREEN_LX, 0); // LEFT OFF
+		}
+		else if (x_deg < -15.0f) {
+		    GPIO_WritePin(LED_PORT, LED_PIN_GREEN_LX, 1); // LEFT ON
+		    GPIO_WritePin(LED_PORT, LED_PIN_RED_RX,   0); // RIGHT OFF
+		}
+		else {
+		    // neutral: both off
+		    GPIO_WritePin(LED_PORT, LED_PIN_GREEN_LX, 0);
+		    GPIO_WritePin(LED_PORT, LED_PIN_RED_RX,   0);
+		}
+
+		if (y_deg > 15.0f) {
+		    GPIO_WritePin(LED_PORT, LED_PIN_ORANGE_UPY, 1); // UP ON
+		    GPIO_WritePin(LED_PORT, LED_PIN_BLUE_DOY,   0); // DOWN OFF
+		}
+		else if (y_deg < -15.0f) {
+		    GPIO_WritePin(LED_PORT, LED_PIN_BLUE_DOY,   1); // DOWN ON
+		    GPIO_WritePin(LED_PORT, LED_PIN_ORANGE_UPY, 0); // UP OFF
+		}
+		else {
+		    // neutral: both off
+		    GPIO_WritePin(LED_PORT, LED_PIN_ORANGE_UPY, 0);
+		    GPIO_WritePin(LED_PORT, LED_PIN_BLUE_DOY,   0);
+		}
+
+	}
+}
+
+/* =============================== Peripherals ============================== */
+
+static void Init_LEDs(void) {
+	GPIO_EnableClock(GPIO_PORT_D, ENABLE);
+
+	GPIO_Config_t led = { 0 };
+	led.Mode = GPIO_MODE_OUTPUT;
+	led.OutputType = GPIO_OTYPE_PP;
+	led.PuPd = GPIO_PULLDOWN;
+
+	GPIO_Init(LED_PORT, LED_PIN_GREEN_LX, &led);
+	GPIO_Init(LED_PORT, LED_PIN_ORANGE_UPY, &led);
+	GPIO_Init(LED_PORT, LED_PIN_RED_RX, &led);
+	GPIO_Init(LED_PORT, LED_PIN_BLUE_DOY, &led);
+
+	GPIO_OSpeed(LED_PORT, LED_PIN_GREEN_LX, GPIO_SPEED_LOW);
+	GPIO_OSpeed(LED_PORT, LED_PIN_ORANGE_UPY, GPIO_SPEED_LOW);
+	GPIO_OSpeed(LED_PORT, LED_PIN_RED_RX, GPIO_SPEED_LOW);
+	GPIO_OSpeed(LED_PORT, LED_PIN_BLUE_DOY, GPIO_SPEED_LOW);
+
+	GPIO_WritePin(LED_PORT, LED_PIN_GREEN_LX, 0);
+	GPIO_WritePin(LED_PORT, LED_PIN_ORANGE_UPY, 0);
+	GPIO_WritePin(LED_PORT, LED_PIN_RED_RX, 0);
+	GPIO_WritePin(LED_PORT, LED_PIN_BLUE_DOY, 0);
+}
+
+static void Init_SPI1_GPIO_CS(void) {
+	/* SPI pins */
+	GPIO_EnableClock(GPIO_PORT_A, ENABLE);
+
+	GPIO_Config_t af = { 0 };
+	af.Mode = GPIO_MODE_ALT;
+	af.OutputType = GPIO_OTYPE_PP;
+	af.PuPd = GPIO_NOPULL;
+	af.AltFunction = 5; /* AF5 = SPI1 */
+
+	GPIO_OSpeed(GPIOA, 5U, GPIO_SPEED_HIGH);
+	GPIO_OSpeed(GPIOA, 6U, GPIO_SPEED_HIGH);
+	GPIO_OSpeed(GPIOA, 7U, GPIO_SPEED_HIGH);
+	GPIO_Init(GPIOA, 7U, &af); /* MOSI */
+	GPIO_Init(GPIOA, 6U, &af); /* MISO */
+	af.PuPd = GPIO_PULLDOWN; /* optional pad idle */
+	GPIO_Init(GPIOA, 5U, &af); /* SCK  */
+
+	/* CS pin */
+	GPIO_EnableClock(GPIO_PORT_E, ENABLE);
+	GPIO_Config_t cs = { 0 };
+	cs.Mode = GPIO_MODE_OUTPUT;
+	cs.OutputType = GPIO_OTYPE_PP;
+	cs.PuPd = GPIO_PULLUP;
+	GPIO_OSpeed(GPIOE, SPI1_CS_PIN, GPIO_SPEED_HIGH);
+	GPIO_Init(GPIOE, SPI1_CS_PIN, &cs);
+	GPIO_WritePin(GPIOE, SPI1_CS_PIN, 1);
+}
+
+static void Config_SPI1(void) {
+	hspi1.SPIx = SPI1;
+	hspi1.config.deviceMode = SPI_MODE_MASTER;
+	hspi1.config.busConfig = SPI_BUS_FULL_DUPLEX;
+	hspi1.config.dff = SPI_DFF_8BITS;
+
+	/* Start with Mode 0; if reads fail, change to CPOL=1, CPHA=2nd (Mode 3) */
+	hspi1.config.cpol = SPI_CPOL_LOW;
+	hspi1.config.cpha = SPI_CPHA_FIRST;
+
+	hspi1.config.ssm = SPI_SSM_ENABLE; /* software NSS */
+	hspi1.config.clkSpeed = 7; /* BR=/256, start slow */
+
+	RCC->APB2ENR |= (1U << 12); /* SPI1 clock */
+	SPI_Init(&hspi1);
+
+	/* When SSM=1, set SSI=1 so NSS is seen high internally */
+	hspi1.SPIx->CR1 |= (1U << 8);
+}
+
+static void delay_cycles(volatile uint32_t n) {
+	while (n--) {
+		__asm__("nop");
+	}
+}

@@ -1,0 +1,214 @@
+/*
+ * spi_driver.c
+ *
+ *  Created on: Aug 6, 2025
+ *      Author: Nikhil Sagar
+ */
+
+#include "spi_driver.h"  // make sure you include the correct header
+
+// ======================== SPI_Init ==========================
+void SPI_Init(SPI_Handle_t *hspi) {
+	uint32_t temp = 0;
+
+	// 1. Set master/slave mode
+	temp |= (hspi->config.deviceMode << 2);  // MSTR = bit 2
+
+	// 2. Bus configuration
+	if (hspi->config.busConfig == SPI_BUS_FULL_DUPLEX) {
+		temp &= ~(1U << 15);  // BIDIMODE = 0
+	} else if (hspi->config.busConfig == SPI_BUS_HALF_DUPLEX) {
+		temp |= (1U << 15);   // BIDIMODE = 1 (1-line)
+		temp |= (1U << 14);   // BIDIOE = 1 (output enabled)
+	} else if (hspi->config.busConfig == SPI_BUS_SIMPLEX_RXONLY) {
+		temp &= ~(1U << 15);  // BIDIMODE = 0
+		temp |= (1U << 10);   // RXONLY = 1
+	}
+
+	// 3. Clock speed (baud rate)
+	temp |= (hspi->config.clkSpeed << 3);  // BR[2:0] = bits 5:3
+
+	// 4. Data frame format
+	temp |= (hspi->config.dff << 11);  // DFF = bit 11 (0 = 8-bit, 1 = 16-bit)
+
+	// 5. Clock polarity and phase
+	temp |= (hspi->config.cpol << 1);  // CPOL = bit 1
+	temp |= (hspi->config.cpha << 0);  // CPHA = bit 0
+
+	// 6. Software slave management
+	temp |= (hspi->config.ssm << 9);   // SSM = bit 9
+
+	// 7. Software NSS (SSI) - only if SSM is enabled
+	if (hspi->config.ssm == SPI_SSM_ENABLE)
+		temp |= (1U << 8);  // SSI = bit 8
+
+	// 8. Load final config into CR1
+	hspi->SPIx->CR1 = temp;
+
+	// SPI not enabled here. Call SPI_PeripheralControl() separately.
+}
+
+// ======================== SPI_DeInit ==========================
+void SPI_DeInit(SPI_Handle_t *hspi) {
+	if (hspi->SPIx == SPI1) {
+		RCC->APB2RSTR |= (1 << 12);
+		RCC->APB2RSTR &= ~(1 << 12);
+	} else if (hspi->SPIx == SPI2) {
+		RCC->APB1RSTR |= (1 << 14);
+		RCC->APB1RSTR &= ~(1 << 14);
+	} else if (hspi->SPIx == SPI3) {
+		RCC->APB1RSTR |= (1 << 15);
+		RCC->APB1RSTR &= ~(1 << 15);
+	}
+}
+
+// ======================== SPI_PeripheralControl ==========================
+void SPI_PeripheralControl(SPI_Handle_t *hspi, uint8_t enable) {
+	if (enable) {
+		hspi->SPIx->CR1 |= (1 << 6);  // SPE = 1 → Enable SPI
+	} else {
+		hspi->SPIx->CR1 &= ~(1 << 6); // SPE = 0 → Disable SPI
+	}
+}
+
+// ======================== SPI_SendData (Polling) ==========================
+
+void SPI_SendData(SPI_Handle_t *hspi, const uint8_t *pTxBuffer, uint32_t len) {
+	if (len == 0U)
+		return;
+
+	if (hspi->config.dff == SPI_DFF_16BITS) {
+		if (len & 1U)
+			return;  // must be even
+
+		for (uint32_t i = 0; i < len; i += 2) {
+			while (!(hspi->SPIx->SR & (1U << 1))) {
+			}  // TXE
+			uint16_t t = ((uint16_t) pTxBuffer[i] << 8)
+					| (uint16_t) pTxBuffer[i + 1]; // MSB-first
+			*(__vo uint16_t*) &hspi->SPIx->DR = t;     // 16-bit write
+		}
+	} else {
+		for (uint32_t i = 0; i < len; ++i) {
+			while (!(hspi->SPIx->SR & (1U << 1))) {
+			}  // TXE
+			*(__vo uint8_t*) &hspi->SPIx->DR = pTxBuffer[i]; // 8-bit write
+		}
+	}
+
+	while (hspi->SPIx->SR & (1U << 7)) {
+	}  // BSY
+}
+void SPI_ReceiveData(SPI_Handle_t *hspi, const uint8_t *pRxBuffer, uint32_t len) {
+	if (len == 0U)
+		return;
+
+	if (hspi->config.dff == SPI_DFF_16BITS) {
+		if (len & 1U)
+			return;  // must be even
+
+		while (!(hspi->SPIx->SR & (1U << 1)));  // TXE
+		uint16_t t = ((uint16_t) pTxBuffer[i] << 8)
+				| (uint16_t) pTxBuffer[i + 1]; // MSB-first
+		*(__vo uint16_t*) &hspi->SPIx->DR = t;     // 16-bit write
+
+	} else {
+		for (uint32_t i = 0; i < len; ++i) {
+			while (!(hspi->SPIx->SR & (1U << 1))) {
+			}  // TXE
+			*(__vo uint8_t*) &hspi->SPIx->DR = pTxBuffer[i]; // 8-bit write
+		}
+	}
+
+	while (hspi->SPIx->SR & (1U << 7)) {
+	}  // BSY
+}
+
+void SPI_SSOEConfig(SPI_RegDef_t *SPIx, uint8_t enable) {
+	if (enable)
+		SPIx->CR2 |= (1 << 2);    // SSOE=1
+	else
+		SPIx->CR2 &= ~(1 << 2);
+}
+/**
+ * @brief  SPI full-duplex transmit + receive (blocking, no macros).
+ *         - Supports 8-bit and 16-bit DFF (use hspi->config.dff).
+ *         - len is in BYTES. In 16-bit mode len MUST be even (2 bytes/frame).
+ *         - If pTx == NULL, dummy bytes (0xFF / 0xFFFF) are sent to clock data in.
+ *         - If pRx == NULL, received data is read and discarded (prevents OVR).
+ *         - Caller should enable/disable SPI (SPE) outside this function.
+ *
+ * @return >=0 number of BYTES transferred; -1 on bad args (e.g., odd len in 16-bit).
+ */
+int SPI_TransmitReceive(SPI_Handle_t *hspi, const uint8_t *pTx, uint8_t *pRx,
+		uint32_t len) {
+	if (len == 0U)
+		return 0;
+
+	if (hspi->config.dff == SPI_DFF_16BITS) {
+		/* Two bytes per frame → require even byte count */
+		if (len & 1U)
+			return -1;
+
+		for (uint32_t i = 0; i < len; i += 2) {
+			/* 1) Wait TXE = 1 */
+			while (!(hspi->SPIx->SR & (1U << 1))) { /* TXE */
+			}
+
+			/* 2) Build the 16-bit word to send (MSB-first default: high byte first) */
+			uint16_t t = 0xFFFFU; /* dummy if pTx == NULL */
+			if (pTx) {
+				t = ((uint16_t) pTx[i] << 8) | (uint16_t) pTx[i + 1U];
+			}
+
+			/* 3) Exact 16-bit write to DR */
+			*(volatile uint16_t*) &hspi->SPIx->DR = t;
+
+			/* 4) Wait RXNE = 1, then exact 16-bit read (clears RXNE) */
+			while (!(hspi->SPIx->SR & (1U << 0))) { /* RXNE */
+			}
+			uint16_t r = *(volatile uint16_t*) &hspi->SPIx->DR;
+
+			/* 5) Store or discard */
+			if (pRx) {
+				pRx[i] = (uint8_t) (r >> 8);
+				pRx[i + 1] = (uint8_t) (r & 0xFFU);
+			}
+		}
+	} else /* 8-bit frames */
+	{
+		for (uint32_t i = 0; i < len; ++i) {
+			/* 1) Wait TXE = 1 */
+			while (!(hspi->SPIx->SR & (1U << 1))) { /* TXE */
+			}
+
+			/* 2) Exact 8-bit write to DR (real byte or dummy 0xFF) */
+			uint8_t t = pTx ? pTx[i] : 0xFFU;
+			*(volatile uint8_t*) &hspi->SPIx->DR = t;
+
+			/* 3) Wait RXNE = 1, then exact 8-bit read (clears RXNE) */
+			while (!(hspi->SPIx->SR & (1U << 0))) { /* RXNE */
+			}
+			uint8_t r = *(volatile uint8_t*) &hspi->SPIx->DR;
+
+			/* 4) Store or discard */
+			if (pRx)
+				pRx[i] = r;
+		}
+	}
+
+	/* 6) Tail flush: ensure last frame finished */
+	while (!(hspi->SPIx->SR & (1U << 1))) { /* TXE */
+	}
+	while (hspi->SPIx->SR & (1U << 7)) { /* BSY */
+	}
+
+	/* 7) Defensive: clear OVR if it somehow set */
+	if (hspi->SPIx->SR & (1U << 6)) {
+		(void) hspi->SPIx->DR;
+		(void) hspi->SPIx->SR;
+	}
+
+	return (int) len;
+}
+

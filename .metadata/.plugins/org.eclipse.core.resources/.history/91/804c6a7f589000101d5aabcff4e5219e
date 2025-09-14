@@ -1,0 +1,143 @@
+/**
+ * @file    lis3dsh.h
+ * @brief   LIS3DSH accelerometer driver (SPI, blocking)
+ * @version 1.0
+ *
+ * @details
+ *  - Minimal, portable driver for LIS3DSH on STM32F4-DISCOVERY
+ *  - Uses user SPI/GPIO HALs: gpio_driver.h, spi_driver.h
+ *  - 4-wire SPI, 8-bit frames, READ = 0x80 | addr, burst supported
+ */
+
+#ifndef LIS3DSH_H
+#define LIS3DSH_H
+
+#include <stdint.h>
+#include "gpio_driver.h"
+#include "spi_driver.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ================================ Types =================================== */
+
+/** @brief LIS3DSH full-scale range. */
+typedef enum {
+    LIS3DSH_FS_2G  = 0,  /**< ±2 g  */
+    LIS3DSH_FS_4G  = 1,  /**< ±4 g  */
+    LIS3DSH_FS_6G  = 2,  /**< ±6 g  */
+    LIS3DSH_FS_8G  = 3,  /**< ±8 g  */
+    LIS3DSH_FS_16G = 4   /**< ±16 g */
+} LIS3DSH_FS_t;
+
+/** @brief LIS3DSH anti-aliasing (AA) filter bandwidth (CTRL5 BW[2:1]). */
+typedef enum {
+    LIS3DSH_BW_800HZ = 0,  /**< 800 Hz  */
+    LIS3DSH_BW_400HZ = 1,  /**< 400 Hz  */
+    LIS3DSH_BW_200HZ = 2,  /**< 200 Hz  */
+    LIS3DSH_BW_50HZ  = 3   /**< 50  Hz  */
+} LIS3DSH_BW_t;
+
+/** @brief LIS3DSH output data rate (CTRL4 ODR[7:4]). */
+typedef enum {
+    LIS3DSH_ODR_PWRDWN = 0x00,
+    LIS3DSH_ODR_3_125HZ= 0x10,
+    LIS3DSH_ODR_6_25HZ = 0x20,
+    LIS3DSH_ODR_12_5HZ = 0x30,
+    LIS3DSH_ODR_25HZ   = 0x40,
+    LIS3DSH_ODR_50HZ   = 0x50,
+    LIS3DSH_ODR_100HZ  = 0x60,
+    LIS3DSH_ODR_400HZ  = 0x70,
+    LIS3DSH_ODR_800HZ  = 0x80,
+    LIS3DSH_ODR_1600HZ = 0x90
+} LIS3DSH_ODR_t;
+
+/** @brief Driver handle (instance). */
+typedef struct {
+    SPI_Handle_t  *spi;        /**< Pointer to user SPI handle                */
+    GPIO_RegDef_t *cs_port;    /**< Chip-select port                          */
+    uint8_t        cs_pin;     /**< Chip-select pin                           */
+    /* Cached control values (optional but handy) */
+    uint8_t        ctrl4;      /**< CTRL4 shadow (ODR/BDU/enable axes)        */
+    uint8_t        ctrl5;      /**< CTRL5 shadow (AA BW / FS / SIM)           */
+    LIS3DSH_FS_t   fs;         /**< Current full-scale                        */
+} LIS3DSH_Handle_t;
+
+/* ============================== Registers ================================= */
+
+#define LIS3DSH_REG_OUT_T        0x0CU
+#define LIS3DSH_REG_WHO_AM_I     0x0FU
+#define LIS3DSH_REG_CTRL4        0x20U
+#define LIS3DSH_REG_CTRL5        0x24U
+#define LIS3DSH_REG_STATUS       0x27U
+#define LIS3DSH_REG_OUT_X_L      0x28U
+#define LIS3DSH_REG_OUT_X_H      0x29U
+#define LIS3DSH_REG_OUT_Y_L      0x2AU
+#define LIS3DSH_REG_OUT_Y_H      0x2BU
+#define LIS3DSH_REG_OUT_Z_L      0x2CU
+#define LIS3DSH_REG_OUT_Z_H      0x2DU
+
+/* STATUS bit */
+#define LIS3DSH_STATUS_ZYXDA_Pos (3U)
+#define LIS3DSH_STATUS_ZYXDA_Msk (1U << LIS3DSH_STATUS_ZYXDA_Pos)
+
+/* CTRL4 bits (we’ll set BDU=1, X/Y/Z enable = 1) */
+#define LIS3DSH_CTRL4_BDU        (1U << 3)
+#define LIS3DSH_CTRL4_XEN        (1U << 0)
+#define LIS3DSH_CTRL4_YEN        (1U << 1)
+#define LIS3DSH_CTRL4_ZEN        (1U << 2)
+
+/* CTRL5 fields */
+#define LIS3DSH_CTRL5_BW_Pos     6U /* BW2:BW1 */
+#define LIS3DSH_CTRL5_FS_Pos     3U /* FSCALE bits */
+
+/* WHO_AM_I expected */
+#define LIS3DSH_WHOAMI_VAL       0x3FU
+
+/* ============================= Public API ================================= */
+
+/**
+ * @brief  Initialize LIS3DSH (WHO_AM_I check, set ODR/BW/FS, enable XYZ, BDU=1).
+ * @param  h     Driver handle (filled by caller)
+ * @param  spi   SPI handle pointer
+ * @param  cs_port CS GPIO port
+ * @param  cs_pin  CS GPIO pin number
+ * @param  odr   Output data rate (LIS3DSH_ODR_t)
+ * @param  bw    AA filter bandwidth (LIS3DSH_BW_t)
+ * @param  fs    Full-scale selection (LIS3DSH_FS_t)
+ * @return 0 on success; <0 on failure
+ */
+int LIS3DSH_Init(LIS3DSH_Handle_t *h,
+                 SPI_Handle_t *spi,
+                 GPIO_RegDef_t *cs_port, uint8_t cs_pin,
+                 LIS3DSH_ODR_t odr, LIS3DSH_BW_t bw, LIS3DSH_FS_t fs);
+
+/** @brief Read WHO_AM_I (0x3F expected). */
+uint8_t LIS3DSH_WhoAmI(LIS3DSH_Handle_t *h);
+
+/** @brief Data-ready flag (STATUS.ZYXDA). Returns 1 if new XYZ is available. */
+uint8_t LIS3DSH_DataReady(LIS3DSH_Handle_t *h);
+
+/** @brief Read raw XYZ (int16). */
+void LIS3DSH_ReadXYZ_Raw(LIS3DSH_Handle_t *h, int16_t *x, int16_t *y, int16_t *z);
+
+/** @brief Read converted XYZ in milli-g (mg). */
+void LIS3DSH_ReadXYZ_mg(LIS3DSH_Handle_t *h, float *x_mg, float *y_mg, float *z_mg);
+
+/** @brief Set ODR (keeps BDU and axis enables). */
+int LIS3DSH_SetODR(LIS3DSH_Handle_t *h, LIS3DSH_ODR_t odr);
+
+/** @brief Set anti-alias BW (CTRL5 BW). */
+int LIS3DSH_SetAAFilterBW(LIS3DSH_Handle_t *h, LIS3DSH_BW_t bw);
+
+/** @brief Set full-scale range. */
+int LIS3DSH_SetFullScale(LIS3DSH_Handle_t *h, LIS3DSH_FS_t fs);
+
+/* ------------ Low-level (optional to expose) ------------ */
+uint8_t LIS3DSH_ReadReg(LIS3DSH_Handle_t *h, uint8_t reg);
+void    LIS3DSH_WriteReg(LIS3DSH_Handle_t *h, uint8_t reg, uint8_t val);
+void    LIS3DSH_ReadMulti(LIS3DSH_Handle_t *h, uint8_t start_reg, uint8_t *buf, uint8_t len);
+
+
+#endif /* LIS3DSH_H */

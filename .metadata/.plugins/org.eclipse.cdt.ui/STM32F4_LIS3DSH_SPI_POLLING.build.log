@@ -1,0 +1,10 @@
+21:16:21 **** Incremental Build of configuration Debug for project STM32f4_LIS3DSH_Spi_Polling ****
+make -j12 all 
+arm-none-eabi-size  STM32f4_LIS3DSH_Spi_Polling.elf 
+   text	   data	    bss	    dec	    hex	filename
+  15164	    456	   1904	  17524	   4474	STM32f4_LIS3DSH_Spi_Polling.elf
+Finished building: default.size.stdout
+ 
+
+21:16:21 Build Finished. 0 errors, 0 warnings. (took 162ms)
+

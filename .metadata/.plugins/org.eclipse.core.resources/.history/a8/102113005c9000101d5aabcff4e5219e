@@ -1,0 +1,127 @@
+/* ============================= Public API ================================= */
+
+/**
+ * @brief Initialize LIS3DSH (blocking).
+ *
+ * Performs WHO_AM_I check, enables X/Y/Z, sets BDU=1, and programs ODR, AA
+ * filter bandwidth, and full-scale. Uses 4-wire SPI, 8-bit frames.
+ *
+ * @param[out] h        Driver handle to initialize (must be non-NULL).
+ * @param[in]  spi      SPI handle used for transfers (non-NULL).
+ * @param[in]  cs_port  GPIO port for sensor CS (non-NULL).
+ * @param[in]  cs_pin   GPIO pin number for CS.
+ * @param[in]  odr      Output data rate selection.
+ * @param[in]  bw       Anti-aliasing filter bandwidth selection.
+ * @param[in]  fs       Full-scale range selection.
+ * @retval 0   Success.
+ * @retval <0  Failure (e.g., WHO_AM_I mismatch or bad args).
+ */
+int LIS3DSH_Init(LIS3DSH_Handle_t *h, SPI_Handle_t *spi, GPIO_RegDef_t *cs_port,
+		uint8_t cs_pin, LIS3DSH_ODR_t odr, LIS3DSH_BW_t bw, LIS3DSH_FS_t fs);
+
+/**
+ * @brief Read WHO_AM_I register.
+ *
+ * @param[in] h   Driver handle.
+ * @return 8-bit WHO_AM_I value (expected 0x3F).
+ */
+uint8_t LIS3DSH_WhoAmI(LIS3DSH_Handle_t *h);
+
+/**
+ * @brief Check if a new XYZ sample is available.
+ *
+ * @param[in] h   Driver handle.
+ * @retval 1  New data available (STATUS.ZYXDA=1).
+ * @retval 0  No new data.
+ */
+uint8_t LIS3DSH_DataReady(LIS3DSH_Handle_t *h);
+
+/**
+ * @brief Read raw 16-bit XYZ acceleration samples.
+ *
+ * Reads OUT_X/Y/Z_L/H in one burst (little-endian per axis). Values are
+ * raw LSBs per current full-scale setting (see datasheet for sensitivity).
+ *
+ * @param[in]  h  Driver handle.
+ * @param[out] x  X-axis raw sample (may be NULL).
+ * @param[out] y  Y-axis raw sample (may be NULL).
+ * @param[out] z  Z-axis raw sample (may be NULL).
+ */
+void LIS3DSH_ReadXYZ_Raw(LIS3DSH_Handle_t *h, int16_t *x, int16_t *y,
+		int16_t *z);
+
+/**
+ * @brief Read XYZ acceleration in milli-g (mg).
+ *
+ * Converts raw LSBs to mg using the current full-scale sensitivity
+ * (cached in the handle). For g-units, multiply outputs by 0.001f.
+ *
+ * @param[in]  h     Driver handle.
+ * @param[out] x_mg  X in mg (may be NULL).
+ * @param[out] y_mg  Y in mg (may be NULL).
+ * @param[out] z_mg  Z in mg (may be NULL).
+ */
+void LIS3DSH_ReadXYZ_mg(LIS3DSH_Handle_t *h, float *x_mg, float *y_mg,
+		float *z_mg);
+
+/**
+ * @brief Set output data rate (ODR).
+ *
+ * Updates CTRL4 ODR bits, preserving BDU and axis enable bits.
+ *
+ * @param[in] h    Driver handle.
+ * @param[in] odr  New ODR value.
+ * @retval 0  Success.
+ */
+int LIS3DSH_SetODR(LIS3DSH_Handle_t *h, LIS3DSH_ODR_t odr);
+
+/**
+ * @brief Set anti-aliasing filter bandwidth (AA BW).
+ *
+ * Updates CTRL5 BW bits. Effective bandwidth depends on ODR (see datasheet).
+ *
+ * @param[in] h   Driver handle.
+ * @param[in] bw  New bandwidth selection.
+ * @retval 0  Success.
+ */
+int LIS3DSH_SetAAFilterBW(LIS3DSH_Handle_t *h, LIS3DSH_BW_t bw);
+
+/**
+ * @brief Set full-scale range.
+ *
+ * Updates CTRL5 FS bits and refreshes the handle’s cached full-scale
+ * to ensure correct mg conversions in @ref LIS3DSH_ReadXYZ_mg.
+ *
+ * @param[in] h   Driver handle.
+ * @param[in] fs  New full-scale selection.
+ * @retval 0  Success.
+ */
+int LIS3DSH_SetFullScale(LIS3DSH_Handle_t *h, LIS3DSH_FS_t fs);
+
+/* ------------ Low-level (optional to expose) ------------ */
+
+/**
+ * @brief Read one 8-bit register over SPI.
+ * @param[in] h    Driver handle.
+ * @param[in] reg  Register address.
+ * @return Register value.
+ */
+uint8_t LIS3DSH_ReadReg(LIS3DSH_Handle_t *h, uint8_t reg);
+
+/**
+ * @brief Write one 8-bit register over SPI.
+ * @param[in] h    Driver handle.
+ * @param[in] reg  Register address.
+ * @param[in] val  Value to write.
+ */
+void LIS3DSH_WriteReg(LIS3DSH_Handle_t *h, uint8_t reg, uint8_t val);
+
+/**
+ * @brief Burst-read starting at @p start_reg.
+ * @param[in]  h          Driver handle.
+ * @param[in]  start_reg  First register to read.
+ * @param[out] buf        Destination buffer (length @p len).
+ * @param[in]  len        Number of bytes to read.
+ */
+void LIS3DSH_ReadMulti(LIS3DSH_Handle_t *h, uint8_t start_reg, uint8_t *buf,
+		uint8_t len);

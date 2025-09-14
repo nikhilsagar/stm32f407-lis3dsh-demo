@@ -1,0 +1,119 @@
+#include "STM32f407VGT.h"
+#include "gpio_driver.h"
+#include "spi_driver.h"
+#include <stdio.h>
+#include <stdint.h>
+
+/**
+ * @file    test.c
+ * @brief   Minimal LIS302DL readout over SPI1 (STM32F4-DISCOVERY)
+ *
+ * Pins (on-board wiring):
+ *   SPI1_SCK  = PA5 (AF5)
+ *   SPI1_MISO = PA6 (AF5)
+ *   SPI1_MOSI = PA7 (AF5)
+ *   MEMS_CS   = PE3  (GPIO, manual CS, idle HIGH)
+ *
+ * SPI mode: 0 (CPOL=0, CPHA=0), 8-bit, start slow (BR=/256)
+ */
+
+#define SPI1_CS_PORT GPIOE
+#define SPI1_CS_PIN 3U
+
+static void Init_SPI1_GPIO_CS(void);
+static void Config_SPI1_TXRX(void);
+static void delay_cycles(volatile uint32_t n);
+
+static inline void CS_LOW(void) {
+	GPIO_WritePin(SPI1_CS_PORT, SPI1_CS_PIN, 0);
+}
+static inline void CS_HIGH(void) {
+	GPIO_WritePin(SPI1_CS_PORT, SPI1_CS_PIN, 1);
+}
+SPI_Handle_t hspi1;
+
+int main() {
+	Init_SPI1_GPIO_CS();
+	Config_SPI1_TXRX();
+	uint8_t cmd = 0x80 | 0x0F;   // READ (bit7=1), MS=0, addr=0x0F => 0x8F
+	uint8_t trash = 0, id = 0;
+	uint8_t dummy = 0x00;
+
+	SPI_PeripheralControl(&hspi1, ENABLE);
+	CS_LOW();
+	SPI_TransmitReceive(&hspi1, &cmd, &trash, 1); // send command, ignore RX
+	SPI_TransmitReceive(&hspi1, &dummy, &id, 1); // send dummy to clock out 1 data byte
+	CS_HIGH();
+	SPI_PeripheralControl(&hspi1, DISABLE);
+	printf("ID=0x%02X trash=0x%02X\r\n", id, trash);
+
+	while (1) {
+		uint8_t x_addr = 0x80 | 0x00 | 0x29;
+		uint8_t y_addr = 0x80 | 0x00 | 0x2B;
+		uint8_t z_addr = 0x80 | 0x00 | 0x2D;
+		uint8_t d = 0x00;
+		uint8_t buf[2];
+		SPI_PeripheralControl(&hspi1, ENABLE);
+		CS_LOW();
+		SPI_TransmitReceive(&hspi1, &x_addr, buf[0], 1); // send command, ignore RX
+		SPI_TransmitReceive(&hspi1, &y_addr, buf[1], 1);
+		SPI_TransmitReceive(&hspi1, &y_addr, buf[2], 1);
+		CS_HIGH();
+		SPI_PeripheralControl(&hspi1, DISABLE);
+
+		int8_t x = (int8_t) buf[0];  // OUT_X
+		int8_t y = (int8_t) buf[1];  // OUT_Y
+		int8_t z = (int8_t) buf[2];  // OUT_Z
+		printf("x=%d t=%d z=%dX\r\n", x, y, z);
+
+	}
+
+}
+
+void Init_SPI1_GPIO_CS(void) {
+	GPIO_EnableClock(GPIO_PORT_A, ENABLE);
+
+	/* Common AF5 config */
+	GPIO_Config_t SPI_1 = { 0 };
+	SPI_1.Mode = GPIO_MODE_ALT;
+	SPI_1.OutputType = GPIO_OTYPE_PP;
+	SPI_1.PuPd = GPIO_NOPULL; /* keep NOPULL for SCK/MOSI */
+	SPI_1.AltFunction = 5; /* AF5 = SPI1 */
+
+	/* SCK (PA5) and MOSI (PA7) */
+	GPIO_OSpeed(GPIOA, 5U, GPIO_SPEED_HIGH);
+	GPIO_OSpeed(GPIOA, 7U, GPIO_SPEED_HIGH);
+	GPIO_OSpeed(GPIOA, 6U, GPIO_SPEED_HIGH);
+	GPIO_Init(GPIOA, 7U, &SPI_1); /* PA7 = MOSI */
+	GPIO_Init(GPIOA, 6U, &SPI_1); /* PA6 = MISO */
+
+	SPI_1.PuPd = GPIO_PULLDOWN;
+	GPIO_Init(GPIOA, 5U, &SPI_1); /* PA5 = SCK */
+
+	GPIO_EnableClock(GPIO_PORT_E, ENABLE);
+	GPIO_Config_t CS_pin = { 0 };
+	CS_pin.Mode = GPIO_MODE_OUTPUT;
+	CS_pin.OutputType = GPIO_OTYPE_PP;
+	CS_pin.PuPd = GPIO_PULLUP;
+	GPIO_OSpeed(GPIOE, 3U, GPIO_SPEED_HIGH);
+	GPIO_Init(GPIOE, 3U, &CS_pin);
+	CS_HIGH();
+}
+
+static void Config_SPI1_TXRX(void) {
+	hspi1.SPIx = SPI1;
+	hspi1.config.deviceMode = SPI_MODE_MASTER;
+	hspi1.config.busConfig = SPI_BUS_FULL_DUPLEX;
+	hspi1.config.dff = SPI_DFF_8BITS;
+	hspi1.config.cpol = SPI_CPOL_LOW; /* Mode 0 */
+	hspi1.config.cpha = SPI_CPHA_FIRST;
+	hspi1.config.ssm = SPI_SSM_ENABLE;
+	hspi1.config.clkSpeed = 7; /* BR=/256 */
+	RCC->APB2ENR |= (1U << 12); /* Enable SPI1 clock  */
+	SPI_Init(&hspi1);
+
+}
+static void delay_cycles(volatile uint32_t n) {
+	while (n--)
+		__asm__("nop");
+}

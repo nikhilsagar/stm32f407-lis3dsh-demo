@@ -1,0 +1,10 @@
+01:16:27 **** Incremental Build of configuration Debug for project Pin_read_bitfield ****
+make -j12 all 
+arm-none-eabi-size  Pin_read_bitfield.elf 
+   text	   data	    bss	    dec	    hex	filename
+    772	      0	   1568	   2340	    924	Pin_read_bitfield.elf
+Finished building: default.size.stdout
+ 
+
+01:16:27 Build Finished. 0 errors, 0 warnings. (took 351ms)
+

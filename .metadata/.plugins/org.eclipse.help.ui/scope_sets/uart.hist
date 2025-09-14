@@ -1,0 +1,4 @@
+#Thu Jul 17 15:52:11 PDT 2025
+__DEFAULT__=false
+expression=uart
+org.eclipse.help.ui.localSearch.master=true
