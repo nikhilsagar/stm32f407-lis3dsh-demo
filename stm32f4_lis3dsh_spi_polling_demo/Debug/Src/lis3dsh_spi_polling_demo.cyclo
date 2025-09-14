@@ -1,0 +1,9 @@
+../Src/lis3dsh_spi_polling_demo.c:97:21:lpf_alpha	1
+../Src/lis3dsh_spi_polling_demo.c:105:20:lpf_init	1
+../Src/lis3dsh_spi_polling_demo.c:114:21:lpf_update	1
+../Src/lis3dsh_spi_polling_demo.c:125:13:add_sample	5
+../Src/lis3dsh_spi_polling_demo.c:161:5:lis3dsh_spi_polling_demo_main	16
+../Src/lis3dsh_spi_polling_demo.c:296:13:Init_LEDs	1
+../Src/lis3dsh_spi_polling_demo.c:323:13:Init_SPI1_GPIO_CS	1
+../Src/lis3dsh_spi_polling_demo.c:361:13:Config_SPI1	1
+../Src/lis3dsh_spi_polling_demo.c:389:13:delay_cycles	2
