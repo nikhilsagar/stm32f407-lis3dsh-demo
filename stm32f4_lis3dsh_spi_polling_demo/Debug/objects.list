@@ -1,8 +1,0 @@
-"./Drivers/Src/gpio_driver.o"
-"./Drivers/Src/lis3dsh.o"
-"./Drivers/Src/spi_driver.o"
-"./Src/lis3dsh_spi_polling_demo.o"
-"./Src/main.o"
-"./Src/syscalls.o"
-"./Src/sysmem.o"
-"./Startup/startup_stm32f407vgtx.o"
